@@ -14,6 +14,7 @@ from qtpy.QtWidgets import (
     QApplication,
     QDialog,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QVBoxLayout,
     QWidget,
@@ -517,7 +518,21 @@ class nnInteractiveWidget(LayerControls):
             # instead of a cryptic crash later.
             conflict = _detect_cudnn_library_conflict()
             if conflict is not None:
-                raise RuntimeError(conflict)
+                # Show the full guidance in a modal pop-up -- napari's notification
+                # bubble truncates this multi-line message. _construct_local_session
+                # runs on the GUI thread (local mode calls it directly, not via a
+                # worker), so showing a dialog here is safe. Keep the propagated error
+                # short so the accompanying notification stays readable.
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Critical)
+                box.setWindowTitle("nnInteractive — GPU library conflict")
+                box.setText(conflict)
+                box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                box.exec_()
+                raise RuntimeError(
+                    "Local GPU inference is blocked by a cuDNN library conflict (see "
+                    "the dialog). Install a matching PyTorch or switch to Remote mode."
+                )
         else:
             show_warning(
                 "Cuda is not available. Using CPU instead. This will result in longer runtimes and additionally auto-zoom will be disabled for runtime reasons"
