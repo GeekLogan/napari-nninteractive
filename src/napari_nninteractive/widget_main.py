@@ -50,6 +50,139 @@ except ImportError:  # httpx ships with the remote client extra
     _SESSION_LOST_ERRORS = (SessionExpiredError,)
 
 
+def _format_cudnn_version(v: int) -> str:
+    """91002 -> '9.10.2' (cuDNN packs version as major*10000 + minor*100 + patch)."""
+    return f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
+
+
+def _find_cudnn_conflict(bundled_ver_int, cudnn_dir, search_dirs):
+    """Pure core of the cuDNN-shadowing check (no torch import, so it is unit-testable).
+
+    Returns ``(system_version_int, system_lib_path)`` when the environment's bundled
+    cuDNN reaches for an engine sub-library it does NOT ship AND a copy of that
+    sub-library of a DIFFERENT version sits on the loader search path -- the exact
+    condition that yields CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. Else None.
+
+    ``cudnn_dir`` is the bundled cuDNN lib dir; ``search_dirs`` are the directories the
+    dynamic loader would consult for a bare-soname dlopen (LD_LIBRARY_PATH plus the
+    standard default dirs), excluding the bundle itself.
+    """
+    import glob
+    import os
+    import re
+
+    try:
+        bundled_files = os.listdir(cudnn_dir)
+    except OSError:
+        return None
+
+    # Which engine sub-libraries does the bundled cuDNN dlopen (by bare soname) but NOT
+    # ship? Scan the dispatcher / graph libs for referenced engine sonames.
+    referenced = set()
+    for name in ("libcudnn_graph.so.9", "libcudnn.so.9"):
+        path = os.path.join(cudnn_dir, name)
+        try:
+            with open(path, "rb") as fh:
+                blob = fh.read()
+        except OSError:
+            continue
+        for match in re.finditer(rb"libcudnn_engines_[a-z_]+\.so", blob):
+            referenced.add(match.group().decode())
+
+    missing = [
+        base
+        for base in {s[: s.index(".so")] for s in referenced}
+        if not any(f.startswith(base + ".so") for f in bundled_files)
+    ]
+    if not missing:
+        return None
+
+    def _parse_ver(path):
+        # .../libcudnn_engines_tensor_ir.so.9.23.2 -> 92302
+        m = re.search(r"\.so\.(\d+)\.(\d+)\.(\d+)", os.path.realpath(path))
+        if not m:
+            return None
+        a, b, c = (int(x) for x in m.groups())
+        return a * 10000 + b * 100 + c
+
+    for base in missing:
+        for d in search_dirs:
+            for cand in sorted(glob.glob(os.path.join(d, base + ".so.9*"))):
+                sys_ver = _parse_ver(cand)
+                if sys_ver is not None and sys_ver != bundled_ver_int:
+                    return sys_ver, cand
+    return None
+
+
+def _detect_cudnn_library_conflict():
+    """Fast, best-effort guard for the cuDNN library conflict that crashes GPU
+    inference on machines with a system-wide cuDNN of a different version than the one
+    the installed PyTorch ships.
+
+    PyTorch's bundled cuDNN dlopens some engine sub-libraries by bare soname at runtime;
+    when the wheel omits such a sub-library (e.g. libcudnn_engines_tensor_ir.so, absent
+    from cuDNN 9.20 wheels but reached for by newer torch builds), the loader falls
+    through to the default search path and can pick up a DIFFERENT version from a system
+    cuDNN, mixing e.g. a 9.23 engine into a 9.20 core. That fails the first convolution
+    with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH.
+
+    Returns an actionable message string when this exact situation is detected, else
+    None. Linux-only (the failure is specific to the ELF loader search). Cheap: a couple
+    of directory listings and one scan of the bundled dispatcher lib.
+    """
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import torch
+
+        bundled_ver_int = torch.backends.cudnn.version()
+        site_packages = os.path.dirname(os.path.dirname(torch.__file__))
+    except Exception:  # noqa: BLE001 - a detection failure must never block init
+        return None
+    if not bundled_ver_int:
+        return None
+
+    cudnn_dir = os.path.join(site_packages, "nvidia", "cudnn", "lib")
+    search_dirs = [
+        d
+        for d in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+        if d and os.path.abspath(d) != os.path.abspath(cudnn_dir)
+    ] + [
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/lib64",
+        "/usr/lib",
+        "/lib",
+    ]
+
+    try:
+        hit = _find_cudnn_conflict(bundled_ver_int, cudnn_dir, search_dirs)
+    except Exception:  # noqa: BLE001 - never let the guard itself break init
+        return None
+    if hit is None:
+        return None
+
+    sys_ver_int, sys_path = hit
+    bundled = _format_cudnn_version(bundled_ver_int)
+    system = _format_cudnn_version(sys_ver_int)
+    return (
+        f"GPU library conflict. The installed PyTorch uses cuDNN {bundled}, but a "
+        f"different system-wide cuDNN {system} is on your library path and gets mixed "
+        f"into it:\n    {sys_path}\nThis crashes local GPU inference "
+        f"(CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH). Your system cuDNN is not broken -- "
+        f"the two versions simply cannot be combined in one process.\n\n"
+        f"Fix (no change to your system CUDA/cuDNN needed) -- pick one:\n"
+        f"  1. Install a matching PyTorch in this environment, then restart napari:\n"
+        f'       pip install "torch==2.8.0" "torchvision==0.23.0" '
+        f"--index-url https://download.pytorch.org/whl/cu129\n"
+        f"  2. Switch to Remote mode to run inference on a server -- no local CUDA is "
+        f"loaded."
+    )
+
+
 class nnInteractiveWidget(LayerControls):
     """
     A widget for the nnInteractive plugin in Napari that manages model inference sessions
@@ -377,6 +510,14 @@ class nnInteractiveWidget(LayerControls):
         if torch.cuda.is_available():
             device = torch.device("cuda:0")
             self._local_running_on_cpu = False
+            # Proactive guard: on Linux a system-wide cuDNN of a different version on the
+            # library path gets mixed into the bundled cuDNN (cuDNN dlopens engine
+            # sub-libraries by bare soname), which crashes the first convolution with
+            # CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. Fail here with actionable guidance
+            # instead of a cryptic crash later.
+            conflict = _detect_cudnn_library_conflict()
+            if conflict is not None:
+                raise RuntimeError(conflict)
         else:
             show_warning(
                 "Cuda is not available. Using CPU instead. This will result in longer runtimes and additionally auto-zoom will be disabled for runtime reasons"
