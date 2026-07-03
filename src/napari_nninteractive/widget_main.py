@@ -203,12 +203,16 @@ def _detect_cudnn_library_conflict():
         f"into it:\n    {sys_path}\nThis crashes local GPU inference "
         f"(CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH). Your system cuDNN is not broken -- "
         f"the two versions simply cannot be combined in one process.\n\n"
-        f"Fix (no change to your system CUDA/cuDNN needed) -- pick one:\n"
+        f"Fix -- pick one (options 1 and 2 leave your system CUDA/cuDNN untouched):\n"
         f"  1. Install a matching PyTorch in this environment, then restart napari:\n"
         f'       pip install "torch==2.8.0" "torchvision==0.23.0" '
-        f"--index-url https://download.pytorch.org/whl/cu129\n"
+        f"--index-url https://download.pytorch.org/whl/cu129 --force-reinstall\n"
         f"  2. Switch to Remote mode to run inference on a server -- no local CUDA is "
-        f"loaded."
+        f"loaded.\n"
+        f"  3. If nothing on your system actually needs that system-wide cuDNN, remove "
+        f"it (or drop its directory from LD_LIBRARY_PATH) so only the installed "
+        f"PyTorch's bundled cuDNN is found:\n"
+        f"       {sys_path}"
     )
 
 
