@@ -13,9 +13,10 @@ from qtpy.QtCore import QEvent, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QDialog,
+    QDialogButtonBox,
     QLabel,
-    QMessageBox,
     QProgressBar,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -49,6 +50,33 @@ try:
     _SESSION_LOST_ERRORS: tuple = (SessionExpiredError, httpx.TransportError)
 except ImportError:  # httpx ships with the remote client extra
     _SESSION_LOST_ERRORS = (SessionExpiredError,)
+
+
+def _show_scrollable_error(parent, title: str, message: str) -> None:
+    """Show a long, multi-line message in a resizable, scrollable modal dialog.
+
+    QMessageBox is not resizable and does not scroll, so long guidance gets clipped
+    (no scrollbar) on smaller screens or higher font-DPI. A QDialog with a read-only,
+    word-wrapped QTextEdit always shows the whole message and keeps it selectable so
+    the user can copy the pip command.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setModal(True)
+    layout = QVBoxLayout(dlg)
+
+    view = QTextEdit(dlg)
+    view.setReadOnly(True)
+    view.setLineWrapMode(QTextEdit.WidgetWidth)
+    view.setPlainText(message)
+    layout.addWidget(view)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=dlg)
+    buttons.accepted.connect(dlg.accept)
+    layout.addWidget(buttons)
+
+    dlg.resize(760, 460)
+    dlg.exec_()
 
 
 def _format_cudnn_version(v: int) -> str:
@@ -518,17 +546,15 @@ class nnInteractiveWidget(LayerControls):
             # instead of a cryptic crash later.
             conflict = _detect_cudnn_library_conflict()
             if conflict is not None:
-                # Show the full guidance in a modal pop-up -- napari's notification
-                # bubble truncates this multi-line message. _construct_local_session
-                # runs on the GUI thread (local mode calls it directly, not via a
-                # worker), so showing a dialog here is safe. Keep the propagated error
-                # short so the accompanying notification stays readable.
-                box = QMessageBox(self)
-                box.setIcon(QMessageBox.Critical)
-                box.setWindowTitle("nnInteractive — GPU library conflict")
-                box.setText(conflict)
-                box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                box.exec_()
+                # Show the full guidance in a resizable, scrollable modal dialog --
+                # napari's notification bubble (and a plain QMessageBox) truncate this
+                # multi-line message. _construct_local_session runs on the GUI thread
+                # (local mode calls it directly, not via a worker), so showing a dialog
+                # here is safe. Keep the propagated error short so the accompanying
+                # notification stays readable.
+                _show_scrollable_error(
+                    self, "nnInteractive — GPU library conflict", conflict
+                )
                 raise RuntimeError(
                     "Local GPU inference is blocked by a cuDNN library conflict (see "
                     "the dialog). Install a matching PyTorch or switch to Remote mode."
