@@ -184,6 +184,7 @@ class BaseGUI(QWidget):
 
         self._unlock_session()
         self._viewer.bind_key("Ctrl+Q", self._close, overwrite=True)
+        self._viewer.bind_key("V", self._toggle_label_visibility, overwrite=True)
 
         # Non-blocking check for newer releases on PyPI. Kept as an attribute so
         # it outlives __init__; the daemon thread it spawns never blocks startup.
@@ -196,6 +197,12 @@ class BaseGUI(QWidget):
         """Closes the viewer and quits the application."""
         self._viewer.close()
         quit()
+
+    def _toggle_label_visibility(self, *args) -> None:
+        """V hotkey: toggle the visibility of the label layer being worked on."""
+        if self.label_layer_name in self._viewer.layers:
+            layer = self._viewer.layers[self.label_layer_name]
+            layer.visible = not layer.visible
 
     def _on_version_check_finished(self, results: dict) -> None:
         """Show an up-to-date / update-available notice from the PyPI check.
@@ -735,6 +742,13 @@ class BaseGUI(QWidget):
             button.setToolTip(f"press {shortcut} to toggle")
             # Show the shortcut on the label; the switch's options/value stay clean.
             button.setText(f"{button.text()} ({shortcut})")
+
+        # Footnote for V, which toggles the label layer's visibility and has no
+        # button of its own (P/B/S/L above already advertise their shortcuts).
+        _legend = QLabel("V — toggle mask visibility")
+        _legend.setAlignment(Qt.AlignLeft)
+        _legend.setStyleSheet("color: gray; font-size: 10px;")
+        _layout.addWidget(_legend)
 
         _group_box.setLayout(_layout)
         return _group_box
