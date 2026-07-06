@@ -301,12 +301,22 @@ class nnInteractiveWidget(LayerControls):
     def _close(self):
         """Ctrl+Q handler: release the lease before quit() raises SystemExit."""
         self._release_session()
+        self._teardown_prompt_cursor()
         super()._close()
 
     def closeEvent(self, event):  # noqa: N802 - Qt API
         """Release the remote lease when the widget is being torn down."""
         self._release_session()
+        self._teardown_prompt_cursor()
         super().closeEvent(event)
+
+    def _teardown_prompt_cursor(self) -> None:
+        """Restore napari's cursor/mouse pipeline so our hooks don't outlive us."""
+        if self._prompt_cursor_manager is not None:
+            self._prompt_cursor_manager.uninstall()
+            self._prompt_cursor_manager = None
+        if getattr(self, "_mouse_controls", None) is not None:
+            self._mouse_controls.uninstall()
 
     # Event Handlers
     def on_init(self, *args, **kwargs):
@@ -908,6 +918,8 @@ class nnInteractiveWidget(LayerControls):
             self.session = None
         self._clear_layers()
         self._unlock_session()
+        # No tool is active after teardown; restore the default canvas cursor.
+        self._refresh_prompt_cursor()
 
     def on_local_settings_changed(self, *args, **kwargs):
         """A baked-in local option (torch.compile / interaction storage) changed.

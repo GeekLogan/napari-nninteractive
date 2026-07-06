@@ -3,6 +3,7 @@ from napari.layers import Labels
 from napari.layers.base._base_constants import ActionType
 
 from napari_nninteractive.layers.abstract_layer import BaseLayerClass
+from napari_nninteractive.mouse_bindings import left_button_only
 
 
 class ScribbleLayer(BaseLayerClass, Labels):
@@ -24,7 +25,8 @@ class ScribbleLayer(BaseLayerClass, Labels):
         self._is_free = False
         self._last_dim_not_displayed = None
         self._last_slice_id = None
-        self.mouse_drag_callbacks.append(self.on_draw)
+        # Left button only, so right/middle stay free for zoom/pan.
+        self.mouse_drag_callbacks.append(left_button_only(self.on_draw))
 
     def replace_color(self, _color) -> None:
         """

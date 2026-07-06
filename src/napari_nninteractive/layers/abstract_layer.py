@@ -4,6 +4,8 @@ from typing import Any, List
 from napari.layers.base._base_constants import ActionType
 from napari.utils.events import Event
 
+from napari_nninteractive.mouse_bindings import left_button_only
+
 
 class BaseLayerClass(ABC):
     """
@@ -30,6 +32,35 @@ class BaseLayerClass(ABC):
             1: [0.561, 0.02, 0.0, 1],  # [143, 5, 0]
         }
         self.events.add(finished=Event)
+        self._restrict_edit_to_left_button()
+
+    # Marker so the custom mouse controls (mouse_bindings) can recognise an
+    # nnInteractive interaction layer without importing this module (avoids a
+    # circular import).
+    _nnint_interaction_layer = True
+
+    def _restrict_edit_to_left_button(self) -> None:
+        """Make napari's edit-mode drag callbacks fire on the left button only.
+
+        napari registers each mode's drag callback (add point / draw / add shape)
+        from ``self._drag_modes`` and it responds to *any* button. We shadow that
+        class-level dict with an instance dict of left-button-only wrappers, so the
+        wrapped callback is what napari appends when the tool's mode is activated.
+        Right/middle buttons are then free for the custom zoom/pan controls.
+        """
+        self._drag_modes = {
+            mode: left_button_only(callback)
+            for mode, callback in self._drag_modes.items()
+        }
+        # Disable napari's built-in camera drag (vispy pans on left-drag and zooms
+        # on right-drag whenever mouse_pan is True, e.g. Points ADD mode). We drive
+        # pan/zoom ourselves via the middle/right buttons, so keep vispy out of the
+        # way and re-assert it on every mode change (the mode setter resets it).
+        self.mouse_pan = False
+        self.events.mode.connect(self._disable_camera_drag)
+
+    def _disable_camera_drag(self, *args, **kwargs) -> None:
+        self.mouse_pan = False
 
     def set_prompt(self, index: int) -> None:
         """

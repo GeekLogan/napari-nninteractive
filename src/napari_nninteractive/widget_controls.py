@@ -17,6 +17,8 @@ from napari_nninteractive.controls.bbox_controls import CustomQtBBoxControls
 from napari_nninteractive.controls.lasso_controls import CustomQtLassoControls
 from napari_nninteractive.controls.point_controls import CustomQtPointsControls
 from napari_nninteractive.controls.scribble_controls import CustomQtScribbleControls
+from napari_nninteractive.cursor import PromptCursorManager
+from napari_nninteractive.mouse_bindings import MouseControls
 from napari_nninteractive.layers.bbox_layer import BBoxLayer
 from napari_nninteractive.layers.lasso_layer import LassoLayer
 from napari_nninteractive.layers.point_layer import SinglePointLayer
@@ -72,6 +74,14 @@ class LayerControls(BaseGUI):
         # entries stay because their interactions are still applied. None means an interaction
         # without a layer marker (e.g. Initialize with Mask).
         self._interaction_history = []
+
+        # Coloured per-tool mouse cursor (green = positive, red = negative), created
+        # lazily on first use via _prompt_cursor.
+        self._prompt_cursor_manager = None
+
+        # Remap mouse buttons: left places prompts, middle pans, right zooms.
+        self._mouse_controls = MouseControls(self._viewer)
+        self._mouse_controls.install()
 
         self._viewer.layers.selection.events.active.connect(self.on_layer_selected)
 
@@ -543,6 +553,19 @@ class LayerControls(BaseGUI):
                 store_output=prev[0], store_overlap=prev[1], store_class_id=prev[2]
             )
 
+    def _prompt_cursor_state(self) -> tuple[Optional[int], bool]:
+        """Current (interaction index, positive) for the coloured prompt cursor."""
+        return self.interaction_button.index, self.prompt_button.index == 0
+
+    def _refresh_prompt_cursor(self) -> None:
+        """Recolour the canvas cursor for the active tool/polarity (green = positive,
+        red = negative), or restore the default cursor when no tool is active."""
+        if self._prompt_cursor_manager is None:
+            self._prompt_cursor_manager = PromptCursorManager(
+                self._viewer, self._prompt_cursor_state
+            )
+        self._prompt_cursor_manager.refresh()
+
     def on_prompt_selected(self) -> None:
         """
         Updates the prompt index for each layer in the viewer based on the selected prompt.
@@ -555,6 +578,7 @@ class LayerControls(BaseGUI):
             if layer_name in self._viewer.layers:
                 self._viewer.layers[layer_name].set_prompt(self.prompt_button.index)
                 self._viewer.layers[layer_name].refresh()
+        self._refresh_prompt_cursor()
 
     def on_interaction_selected(self) -> None:
         """
@@ -582,6 +606,8 @@ class LayerControls(BaseGUI):
         elif self.interaction_type == 3:  # Add Lasso Layer
             self.add_lasso_layer()
 
+        self._refresh_prompt_cursor()
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             self._viewer.window._qt_viewer.setFocus()
@@ -598,6 +624,7 @@ class LayerControls(BaseGUI):
         self.interaction_type = None
         self.interaction_button._uncheck()
         self._viewer.layers.selection.clear()
+        self._refresh_prompt_cursor()
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
@@ -633,6 +660,7 @@ class LayerControls(BaseGUI):
         self.interaction_type = key
         self.interaction_button._uncheck()
         self.interaction_button._check(self.interaction_type)
+        self._refresh_prompt_cursor()
 
     def _export(self) -> None:
         """Export all Label layers belonging to the current image & model pair as separate files
