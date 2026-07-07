@@ -143,79 +143,6 @@ def _find_cudnn_conflict(bundled_ver_int, cudnn_dir, search_dirs):
     return None
 
 
-def _detect_cudnn_library_conflict():
-    """Fast, best-effort guard for the cuDNN library conflict that crashes GPU
-    inference on machines with a system-wide cuDNN of a different version than the one
-    the installed PyTorch ships.
-
-    PyTorch's bundled cuDNN dlopens some engine sub-libraries by bare soname at runtime;
-    when the wheel omits such a sub-library (e.g. libcudnn_engines_tensor_ir.so, absent
-    from cuDNN 9.20 wheels but reached for by newer torch builds), the loader falls
-    through to the default search path and can pick up a DIFFERENT version from a system
-    cuDNN, mixing e.g. a 9.23 engine into a 9.20 core. That fails the first convolution
-    with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH.
-
-    Returns an actionable message string when this exact situation is detected, else
-    None. Linux-only (the failure is specific to the ELF loader search). Cheap: a couple
-    of directory listings and one scan of the bundled dispatcher lib.
-    """
-    import sys
-
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        import torch
-
-        bundled_ver_int = torch.backends.cudnn.version()
-        site_packages = os.path.dirname(os.path.dirname(torch.__file__))
-    except Exception:  # noqa: BLE001 - a detection failure must never block init
-        return None
-    if not bundled_ver_int:
-        return None
-
-    cudnn_dir = os.path.join(site_packages, "nvidia", "cudnn", "lib")
-    search_dirs = [
-        d
-        for d in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
-        if d and os.path.abspath(d) != os.path.abspath(cudnn_dir)
-    ] + [
-        "/usr/lib/x86_64-linux-gnu",
-        "/lib/x86_64-linux-gnu",
-        "/usr/lib64",
-        "/lib64",
-        "/usr/lib",
-        "/lib",
-    ]
-
-    try:
-        hit = _find_cudnn_conflict(bundled_ver_int, cudnn_dir, search_dirs)
-    except Exception:  # noqa: BLE001 - never let the guard itself break init
-        return None
-    if hit is None:
-        return None
-
-    sys_ver_int, sys_path = hit
-    bundled = _format_cudnn_version(bundled_ver_int)
-    system = _format_cudnn_version(sys_ver_int)
-    return (
-        f"GPU library conflict. The installed PyTorch uses cuDNN {bundled}, but a "
-        f"different system-wide cuDNN {system} is on your library path and gets mixed "
-        f"into it:\n    {sys_path}\nThis crashes local GPU inference "
-        f"(CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH). Your system cuDNN is not broken -- "
-        f"the two versions simply cannot be combined in one process.\n\n"
-        f"Fix -- pick one (options 1 and 2 leave your system CUDA/cuDNN untouched):\n"
-        f"  1. Install a matching PyTorch in this environment, then restart napari:\n"
-        f'       pip install "torch==2.8.0" "torchvision==0.23.0" '
-        f"--index-url https://download.pytorch.org/whl/cu129 --force-reinstall\n"
-        f"  2. Switch to Remote mode to run inference on a server -- no local CUDA is "
-        f"loaded.\n"
-        f"  3. If nothing on your system actually needs that system-wide cuDNN, remove "
-        f"it (or drop its directory from LD_LIBRARY_PATH) so only the installed "
-        f"PyTorch's bundled cuDNN is found:\n"
-        f"       {sys_path}"
-    )
-
-
 class nnInteractiveWidget(LayerControls):
     """
     A widget for the nnInteractive plugin in Napari that manages model inference sessions
@@ -583,26 +510,6 @@ class nnInteractiveWidget(LayerControls):
         if torch.cuda.is_available():
             device = torch.device("cuda:0")
             self._local_running_on_cpu = False
-            # Proactive guard: on Linux a system-wide cuDNN of a different version on the
-            # library path gets mixed into the bundled cuDNN (cuDNN dlopens engine
-            # sub-libraries by bare soname), which crashes the first convolution with
-            # CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. Fail here with actionable guidance
-            # instead of a cryptic crash later.
-            conflict = _detect_cudnn_library_conflict()
-            if conflict is not None:
-                # Show the full guidance in a resizable, scrollable modal dialog --
-                # napari's notification bubble (and a plain QMessageBox) truncate this
-                # multi-line message. _construct_local_session runs on the GUI thread
-                # (local mode calls it directly, not via a worker), so showing a dialog
-                # here is safe. Keep the propagated error short so the accompanying
-                # notification stays readable.
-                _show_scrollable_error(
-                    self, "nnInteractive — GPU library conflict", conflict
-                )
-                raise RuntimeError(
-                    "Local GPU inference is blocked by a cuDNN library conflict (see "
-                    "the dialog). Install a matching PyTorch or switch to Remote mode."
-                )
         else:
             show_warning(
                 "Cuda is not available. Using CPU instead. This will result in longer runtimes and additionally auto-zoom will be disabled for runtime reasons"
