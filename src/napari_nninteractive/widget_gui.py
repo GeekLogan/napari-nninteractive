@@ -925,7 +925,9 @@ class BaseGUI(QWidget):
             "new_points",
             self._viewer.theme,
             self._export_centroids,
-            tooltips="Save the 3D centroid of every segmented object to a CSV file",
+            tooltips="Save each object's XY centroid on every Z slice it appears on to a "
+            "CSV file (one row per slice, for tracking objects over time with Z as the "
+            "time axis)",
         )
         _group_box.setLayout(_layout)
         return _group_box

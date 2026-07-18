@@ -745,15 +745,18 @@ class LayerControls(BaseGUI):
             raise ValueError("Output path has to be a directory, not a file")
 
     def _export_centroids(self) -> None:
-        """Export the 3D centroid of each segmented object to a CSV file.
+        """Export the per-slice XY centroid of each segmented object to a CSV file.
 
         Collects every result layer of the current image (the per-object layers, the
         instance map and the semantic map) plus the still in-progress working layer,
-        computes the centre of mass of every label id each one contains, and writes one
-        row per object: the source layer, label id, voxel count, and the centroid both
-        in voxel indices and in world coordinates (using the source image's transforms,
-        matching what ``_export`` writes to file). Unlike ``_export``, the in-progress
-        object is included as-is and not committed, so this has no side effects.
+        and for every label id each one contains writes one row per Z slice the object
+        appears on: the source layer, label id, Z index, pixel count in that slice, and
+        the slice's XY centroid both in pixel indices and in world coordinates (using
+        the source image's transforms, matching what ``_export`` writes to file).
+        Treating Z as a time axis, each row is then one object observation per frame,
+        ready for tracking objects over time. A 2D image yields a single row per object
+        with Z = 0. Unlike ``_export``, the in-progress object is included as-is and
+        not committed, so this has no side effects.
         """
         _name = self.session_cfg["name"]
 
@@ -811,7 +814,6 @@ class LayerControls(BaseGUI):
             shear=self.source_cfg["shear"],
         )
 
-        _axes = ["z", "y", "x"][-_ndim:] if _ndim <= 3 else [f"axis{i}" for i in range(_ndim)]
         _rows = []
         for _src_name, _data in _sources:
             # Convert dummy 3d back to 2d, matching the exported files.
@@ -820,20 +822,32 @@ class LayerControls(BaseGUI):
                 if _label == 0:
                     continue
                 _coords = np.argwhere(_data == _label)
-                _centroid = _coords.mean(axis=0)
-                _world = _ref_layer.data_to_world(_centroid)
-                _rows.append(
-                    [_src_name, int(_label), len(_coords), *_centroid.tolist(), *_world]
-                )
+                if _ndim == 2:
+                    # Single frame: one observation at Z = 0.
+                    _slices = [(0, _coords)]
+                else:
+                    # One observation per Z slice the object appears on.
+                    _slices = [
+                        (int(_z), _coords[_coords[:, 0] == _z, 1:])
+                        for _z in np.unique(_coords[:, 0])
+                    ]
+                for _z, _yx in _slices:
+                    _centroid = _yx.mean(axis=0)
+                    _world = _ref_layer.data_to_world(
+                        _centroid if _ndim == 2 else np.concatenate([[_z], _centroid])
+                    )
+                    _rows.append(
+                        [_src_name, int(_label), _z, len(_yx), *_centroid.tolist(), *_world[-2:]]
+                    )
         del _ref_layer
 
         with open(_file, "w", newline="") as _f:
             _writer = csv.writer(_f)
             _writer.writerow(
-                ["layer", "label_id", "voxel_count"]
-                + [f"centroid_voxel_{a}" for a in _axes]
-                + [f"centroid_world_{a}" for a in _axes]
+                ["layer", "label_id", "z", "pixel_count"]
+                + [f"centroid_pixel_{a}" for a in ("y", "x")]
+                + [f"centroid_world_{a}" for a in ("y", "x")]
             )
             _writer.writerows(_rows)
 
-        show_info(f"Exported {len(_rows)} centroid(s) to {_file}")
+        show_info(f"Exported {len(_rows)} centroid observation(s) to {_file}")
