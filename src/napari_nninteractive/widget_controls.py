@@ -1,3 +1,4 @@
+import csv
 import os
 import warnings
 from pathlib import Path
@@ -8,7 +9,7 @@ from napari._qt.layer_controls.qt_layer_controls_container import layer_to_contr
 from napari.layers import Labels
 from napari.layers.base._base_constants import ActionType
 from napari.utils.colormaps import DirectLabelColormap
-from napari.utils.notifications import show_warning
+from napari.utils.notifications import show_info, show_warning
 from napari.utils.transforms import Affine
 from napari.viewer import Viewer
 from qtpy.QtWidgets import QFileDialog, QWidget
@@ -742,3 +743,97 @@ class LayerControls(BaseGUI):
                 del _layer_temp
         else:
             raise ValueError("Output path has to be a directory, not a file")
+
+    def _export_centroids(self) -> None:
+        """Export the 3D centroid of each segmented object to a CSV file.
+
+        Collects every result layer of the current image (the per-object layers, the
+        instance map and the semantic map) plus the still in-progress working layer,
+        computes the centre of mass of every label id each one contains, and writes one
+        row per object: the source layer, label id, voxel count, and the centroid both
+        in voxel indices and in world coordinates (using the source image's transforms,
+        matching what ``_export`` writes to file). Unlike ``_export``, the in-progress
+        object is included as-is and not committed, so this has no side effects.
+        """
+        _name = self.session_cfg["name"]
+
+        # Gather (csv label, data) for every result layer, mirroring _export's matching.
+        _sources = []
+        for _layer in self._viewer.layers:
+            if (_layer.name.startswith("object ") and _layer.name.endswith(f" - {_name}")) or (
+                _layer.name in (f"instance map - {_name}", f"semantic map - {_name}")
+            ):
+                _sources.append((_layer.name, _layer.data))
+        # Include the uncommitted in-progress object so it is never silently missing.
+        if self.label_layer_name in self._viewer.layers and np.any(
+            self._viewer.layers[self.label_layer_name].data
+        ):
+            _sources.append(("current object", self._viewer.layers[self.label_layer_name].data))
+
+        if not _sources:
+            show_warning("No segmented objects found - nothing to export")
+            return
+
+        # Default file name derived from the input file, like _export's output names.
+        _img_layer = self._viewer.layers[self.source_cfg["name"]]
+        _path = _img_layer.source.path
+        if _path is not None:
+            _img_file = Path(_path).name
+            _suffix = ".nii.gz" if str(_img_file).endswith(".nii.gz") else Path(_img_file).suffix
+            _base = _img_file.replace(_suffix, "")
+        else:
+            _base = self.source_cfg["name"]
+
+        _file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Centroids",
+            str(Path(os.getcwd()).joinpath(f"{_base}_centroids.csv")),
+            "CSV files (*.csv)",
+            options=QFileDialog.DontUseNativeDialog,
+        )
+        if _file == "":
+            return
+        if not _file.endswith(".csv"):
+            _file += ".csv"
+
+        # Reference layer carrying the *source* transforms (affine/scale/translate/
+        # rotate/shear), so voxel centroids are mapped into the same world space the
+        # exported label files live in - not the orthogonalized session transforms
+        # the viewer layers use. The dummy 1-voxel array is never read.
+        _ndim = self.source_cfg["ndim"]
+        _ref_layer = Labels(
+            np.zeros((1,) * _ndim, dtype=np.uint8),
+            name="_temp",
+            affine=self.source_cfg["affine"],
+            scale=self.source_cfg["scale"],
+            translate=self.source_cfg["translate"],
+            rotate=self.source_cfg["rotate"],
+            shear=self.source_cfg["shear"],
+        )
+
+        _axes = ["z", "y", "x"][-_ndim:] if _ndim <= 3 else [f"axis{i}" for i in range(_ndim)]
+        _rows = []
+        for _src_name, _data in _sources:
+            # Convert dummy 3d back to 2d, matching the exported files.
+            _data = _data[0] if _ndim == 2 else _data
+            for _label in np.unique(_data):
+                if _label == 0:
+                    continue
+                _coords = np.argwhere(_data == _label)
+                _centroid = _coords.mean(axis=0)
+                _world = _ref_layer.data_to_world(_centroid)
+                _rows.append(
+                    [_src_name, int(_label), len(_coords), *_centroid.tolist(), *_world]
+                )
+        del _ref_layer
+
+        with open(_file, "w", newline="") as _f:
+            _writer = csv.writer(_f)
+            _writer.writerow(
+                ["layer", "label_id", "voxel_count"]
+                + [f"centroid_voxel_{a}" for a in _axes]
+                + [f"centroid_world_{a}" for a in _axes]
+            )
+            _writer.writerows(_rows)
+
+        show_info(f"Exported {len(_rows)} centroid(s) to {_file}")

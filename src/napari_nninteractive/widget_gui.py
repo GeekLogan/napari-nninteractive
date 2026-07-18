@@ -257,6 +257,7 @@ class BaseGUI(QWidget):
         self.prompt_button.setEnabled(False)
         self.interaction_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        self.export_centroids_button.setEnabled(False)
         self.reset_interaction_button.setEnabled(False)
         self.undo_button.setEnabled(False)
         self.label_for_init.setEnabled(False)
@@ -293,6 +294,7 @@ class BaseGUI(QWidget):
         self.prompt_button.setEnabled(True)
         self.interaction_button.setEnabled(True)
         self.export_button.setEnabled(True)
+        self.export_centroids_button.setEnabled(True)
         self.reset_interaction_button.setEnabled(True)
         self.undo_button.setEnabled(True)
         self.label_for_init.setEnabled(True)
@@ -917,6 +919,14 @@ class BaseGUI(QWidget):
         self.export_button = setup_iconbutton(
             _layout, "Export", "pop_out", self._viewer.theme, self._export
         )
+        self.export_centroids_button = setup_iconbutton(
+            _layout,
+            "Export Centroids",
+            "new_points",
+            self._viewer.theme,
+            self._export_centroids,
+            tooltips="Save the 3D centroid of every segmented object to a CSV file",
+        )
         _group_box.setLayout(_layout)
         return _group_box
 
@@ -1026,3 +1036,6 @@ class BaseGUI(QWidget):
 
     def _export(self) -> None:
         """Placeholder method for exporting all generated label layers"""
+
+    def _export_centroids(self) -> None:
+        """Placeholder method for exporting the centroid of each segmented object"""
